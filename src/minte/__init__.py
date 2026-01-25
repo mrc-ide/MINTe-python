@@ -5,7 +5,7 @@ A neural network-based malaria scenario prediction package for evaluating
 intervention strategies including ITNs, IRS, and LSM.
 """
 
-__version__ = "1.2.0"
+__version__ = "1.3.0"
 
 from .controller import run_minter_scenarios, MinterConfig, MinterResults
 from .emulator import (
