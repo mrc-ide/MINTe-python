@@ -37,15 +37,16 @@ class MintwebResults:
     cases: pd.DataFrame | None = None
     scenario_meta: pd.DataFrame | None = None
     eir_valid: bool = True
+    prev_ood: bool = False
     benchmarks: dict | None = None
-    
+
     def __getitem__(self, key: str) -> Any:
         """Allow dict-style access for backwards compatibility."""
         return getattr(self, key)
-    
+
     def keys(self) -> list[str]:
         """Return available keys."""
-        return ["prevalence", "cases", "scenario_meta", "eir_valid", "benchmarks"]
+        return ["prevalence", "cases", "scenario_meta", "eir_valid", "prev_ood", "benchmarks"]
 
 
 def run_mintweb_controller(
@@ -187,6 +188,7 @@ def run_mintweb_controller(
         cases=results.cases,
         scenario_meta=results.scenario_meta,
         eir_valid=results.eir_valid,
+        prev_ood=results.prev_ood,
         benchmarks=results.benchmarks,
     )
 

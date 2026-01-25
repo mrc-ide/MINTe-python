@@ -54,7 +54,7 @@ class MinterConfig:
 @dataclass
 class MinterResults:
     """Results from a MINT scenario run.
-    
+
     Provides attribute access to match R API: results$prevalence, results$cases, etc.
     """
 
@@ -62,15 +62,16 @@ class MinterResults:
     cases: pd.DataFrame | None = None
     scenario_meta: pd.DataFrame | None = None
     eir_valid: bool = True
+    prev_ood: bool = False
     benchmarks: dict | None = None
-    
+
     def __getitem__(self, key: str) -> Any:
         """Allow dict-style access for backwards compatibility."""
         return getattr(self, key)
-    
+
     def keys(self) -> list[str]:
         """Return available keys."""
-        return ["prevalence", "cases", "scenario_meta", "eir_valid", "benchmarks"]
+        return ["prevalence", "cases", "scenario_meta", "eir_valid", "prev_ood", "benchmarks"]
 
 
 # Valid net type names
@@ -456,8 +457,15 @@ def run_minter_scenarios(
     # Compute EIR validity
     eir_valid = (eir_values >= 0.68) & (eir_values <= 350.0)
 
+    # Compute prevalence OOD flag (estiMINT trained on prev >= 0.02)
+    prev_ood = prev < 0.02
+
     scenario_meta = pd.DataFrame(
-        {"scenario_tag": scenario_ids, "eir_valid": eir_valid}
+        {
+            "scenario_tag": scenario_ids,
+            "eir_valid": eir_valid,
+            "prev_ood": prev_ood
+        }
     )
 
     # Create scenarios DataFrame
@@ -465,7 +473,11 @@ def run_minter_scenarios(
     scenarios_df = scenarios_df.rename(columns={"scenario_id": "scenario_tag"})
 
     # Run predictions
-    results = MinterResults(scenario_meta=scenario_meta, eir_valid=any(eir_valid))
+    results = MinterResults(
+        scenario_meta=scenario_meta,
+        eir_valid=any(eir_valid),
+        prev_ood=any(prev_ood)
+    )
 
     if "prevalence" in predictor:
         if benchmark:
@@ -484,6 +496,7 @@ def run_minter_scenarios(
         prevalence_results["scenario"] = np.repeat(scenario_ids, rows_per_scn)
         prevalence_results["scenario_tag"] = prevalence_results["scenario"]
         prevalence_results["eir_valid"] = np.repeat(eir_valid, rows_per_scn)
+        prevalence_results["prev_ood"] = np.repeat(prev_ood, rows_per_scn)
 
         results.prevalence = prevalence_results
 
@@ -507,6 +520,7 @@ def run_minter_scenarios(
         cases_results["scenario"] = np.repeat(scenario_ids, rows_per_scn)
         cases_results["scenario_tag"] = cases_results["scenario"]
         cases_results["eir_valid"] = np.repeat(eir_valid, rows_per_scn)
+        cases_results["prev_ood"] = np.repeat(prev_ood, rows_per_scn)
 
         results.cases = cases_results
 

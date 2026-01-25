@@ -66,12 +66,7 @@ class ModelSchema:
 
     expected_in: int
     cyc: bool = True  # Use cyclical time encoding
-    add_year_idx: bool = False  # Add year index feature
-    include_lag: bool = False  # Include lagged target
-    events_n: int = 0  # Number of event features (0 or 9)
-    extra2: int = 0  # Extra post-intervention features (0 or 2)
-    has_jump: bool = False  # Has jump connection for events
-    use_film: bool = False  # Has FiLM layers
+    extra2: int = 2  # Extra post-intervention features (always 2 for new models)
 
 
 @dataclass
@@ -90,7 +85,6 @@ class EmulatorModels:
     training_args: dict
     models_dir: Path
     eps_prevalence: float = 1e-5
-    event_jitter_days: int = 7
 
 
 # Standard static covariates used by the models
@@ -119,11 +113,8 @@ AFTER9_COVARS = ["dn0_future", "itn_future", "irs_future", "lsm", "routine"]
 
 class SchemaAwareLSTM(nn.Module):
     """
-    LSTM model with schema-aware features.
-    
-    Supports FiLM conditioning, jump connections for events, and 
-    flexible input schemas.
-    
+    Simple LSTM model for time series prediction.
+
     CRITICAL: Uses batch_first=False, so input shape is [T, B, F]
     """
 
@@ -135,17 +126,11 @@ class SchemaAwareLSTM(nn.Module):
         dropout_prob: float,
         num_layers: int = 1,
         predictor: str = "prevalence",
-        use_film: bool = False,
-        has_jump: bool = False,
-        events_n: int = 0,
     ):
         super().__init__()
         self.hidden_size = hidden_size
         self.num_layers = num_layers
         self.predictor = predictor
-        self.use_film = use_film
-        self.has_jump = has_jump
-        self.events_n = events_n
 
         self.lstm = nn.LSTM(
             input_size,
@@ -157,55 +142,28 @@ class SchemaAwareLSTM(nn.Module):
         self.fc = nn.Linear(hidden_size, output_size)
         self.ln = nn.LayerNorm(hidden_size)
         self.dropout = nn.Dropout(dropout_prob)
-        self.activation = nn.Identity()  # No activation in forward pass
-
-        self.film = None
-        if self.use_film:
-            self.film = nn.Sequential(
-                nn.Linear(input_size, 128),
-                nn.ReLU(),
-                nn.Linear(128, hidden_size * 2),
-            )
-
-        self.jump_head = None
-        if self.has_jump and events_n == 9:
-            self.jump_head = nn.Linear(9, 1, bias=False)
-
-    def _film_gb(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        """Compute FiLM gamma and beta from context."""
-        ctx = x.mean(dim=0)  # [B, F]
-        gamma, beta = torch.chunk(self.film(ctx), 2, dim=-1)
-        return gamma.unsqueeze(0), beta.unsqueeze(0)
+        self.activation = nn.Identity()  # Train in transformed space -> identity activation
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         Forward pass.
-        
+
         Parameters
         ----------
         x : torch.Tensor
             Input tensor of shape [T, B, F] (sequence-first!)
-            
+
         Returns
         -------
         torch.Tensor
             Output tensor of shape [T, B, 1]
         """
         out, _ = self.lstm(x)
-
-        if self.use_film and self.film is not None:
-            gamma, beta = self._film_gb(x)
-            out = out * (1 + gamma) + beta
-
         out = self.ln(out)
         out = self.dropout(out)
-        base = self.fc(out)
-
-        if self.has_jump and self.jump_head is not None and self.events_n == 9:
-            pulses_block = x[..., -9:]  # Last 9 features are event pulses
-            base = base + self.jump_head(pulses_block)
-
-        return self.activation(base)
+        out = self.fc(out)
+        out = self.activation(out)
+        return out
 
 
 # Alias for backwards compatibility
@@ -242,15 +200,18 @@ def safe_load_state(path: str | Path, device: torch.device) -> Dict[str, Any]:
 
 
 def infer_schema_from_state(
-    state: Dict[str, Any], 
-    static_n: int, 
+    state: Dict[str, Any],
+    static_n: int,
     use_cyclical_time: bool
 ) -> ModelSchema:
     """
     Infer the feature schema from checkpoint state dict.
-    
-    Uses a scoring system to find the best matching feature combination.
-    
+
+    New simplified models have structure:
+    - Time encoding (2 if cyclical, 1 if not)
+    - Static covariates (static_n)
+    - Extra 2 features (post9, t_since9_years)
+
     Parameters
     ----------
     state : dict
@@ -259,7 +220,7 @@ def infer_schema_from_state(
         Number of static covariates.
     use_cyclical_time : bool
         Whether cyclical time encoding is expected.
-        
+
     Returns
     -------
     ModelSchema
@@ -274,47 +235,27 @@ def infer_schema_from_state(
             raise RuntimeError("Cannot infer input size: no *weight_ih_l0 in checkpoint.")
         expected_in = int(state[keys[0]].shape[1])
 
-    has_jump = any(k.startswith("jump_head") for k in state.keys())
-    use_film = any(k.startswith("film.") for k in state.keys())
-
-    # Try different feature combinations with scoring
+    # Try different feature combinations
     candidates = []
     for cyc in (True, False):
         time_dim = 2 if cyc else 1
-        for add_year_idx in (1, 0):
-            for include_lag in (1, 0):
-                for events_n in (9, 0):
-                    for extra2 in (2, 0):
-                        total = time_dim + add_year_idx + static_n + include_lag + events_n + extra2
-                        if total == expected_in:
-                            # Score this combination
-                            score = 0
-                            if cyc == use_cyclical_time:
-                                score += 4
-                            if events_n == 9 and has_jump:
-                                score += 4
-                            if extra2 == 2:
-                                score += 5
-                            if include_lag == 1:
-                                score -= 1  # Lag is less common
-
-                            candidates.append((
-                                score,
-                                ModelSchema(
-                                    expected_in=expected_in,
-                                    cyc=cyc,
-                                    add_year_idx=bool(add_year_idx),
-                                    include_lag=bool(include_lag),
-                                    events_n=events_n,
-                                    extra2=extra2,
-                                    has_jump=has_jump,
-                                    use_film=use_film,
-                                ),
-                            ))
+        total = time_dim + static_n + 2  # Always 2 extra features
+        if total == expected_in:
+            score = 10 if cyc == use_cyclical_time else 0
+            candidates.append((
+                score,
+                ModelSchema(
+                    expected_in=expected_in,
+                    cyc=cyc,
+                    extra2=2,
+                ),
+            ))
 
     if not candidates:
         raise RuntimeError(
-            f"Could not map checkpoint input size {expected_in} to any feature combination."
+            f"Could not map checkpoint input size {expected_in} to any feature combination. "
+            f"Expected {2 if use_cyclical_time else 1} + {static_n} + 2 = "
+            f"{(2 if use_cyclical_time else 1) + static_n + 2}, got {expected_in}"
         )
 
     # Sort by score descending and return best match
@@ -369,9 +310,6 @@ def load_model_from_checkpoint(
         dropout_prob=0.0,  # No dropout at inference
         num_layers=layers,
         predictor=predictor,
-        use_film=schema.use_film,
-        has_jump=schema.has_jump,
-        events_n=schema.events_n,
     )
 
     model.load_state_dict(state, strict=True)
@@ -462,7 +400,6 @@ def load_emulator_models(
     # Model configuration
     use_cyclical_time = training_args.get("use_cyclical_time", True)
     eps_prevalence = training_args.get("eps_prevalence", 1e-5)
-    event_jitter_days = training_args.get("event_jitter_days", 7)
 
     # Load LSTM model
     lstm_path = predictor_models_dir / "lstm_best.pt"
@@ -480,10 +417,7 @@ def load_emulator_models(
     if verbose:
         logger.info(f"LSTM model loaded successfully")
         logger.info(f"Expected input features: {lstm_schema.expected_in}")
-        logger.info(
-            f"Schema: cyc={lstm_schema.cyc}, year_idx={lstm_schema.add_year_idx}, "
-            f"lag={lstm_schema.include_lag}, events={lstm_schema.events_n}, extra2={lstm_schema.extra2}"
-        )
+        logger.info(f"Schema: cyc={lstm_schema.cyc}, extra2={lstm_schema.extra2}")
 
     # Create models container
     models = EmulatorModels(
@@ -499,7 +433,6 @@ def load_emulator_models(
         training_args=training_args,
         models_dir=predictor_models_dir,
         eps_prevalence=eps_prevalence,
-        event_jitter_days=event_jitter_days,
     )
 
     # Cache the models
@@ -511,45 +444,18 @@ def load_emulator_models(
     return models
 
 
-def create_event_pulses(abs_t: np.ndarray, events: list[float], jitter_days: float) -> np.ndarray:
-    """Create Gaussian pulse features for intervention events."""
-    if len(events) == 0:
-        return np.zeros(len(abs_t))
-
-    sig = jitter_days
-    result = np.zeros(len(abs_t))
-
-    for i, t in enumerate(abs_t):
-        result[i] = sum(np.exp(-0.5 * ((t - e) / sig) ** 2) for e in events)
-
-    return result
-
-
-def create_time_since(abs_t: np.ndarray, events: list[float]) -> np.ndarray:
-    """Create time-since-event features."""
-    if len(events) == 0:
-        return np.zeros(len(abs_t))
-
-    events = np.array(sorted(events))
-    result = np.zeros(len(abs_t))
-
-    for i, t in enumerate(abs_t):
-        idx = np.searchsorted(events, t, side="right") - 1
-        if idx < 0:
-            result[i] = 0
-        else:
-            result[i] = max(0, (t - events[idx]) / 365)
-
-    return result
-
-
 def prepare_input_features_schema(
     df: pd.DataFrame,
     models: EmulatorModels,
     window_size: int = 14,
 ) -> np.ndarray:
     """
-    Prepare input features with full schema support.
+    Prepare input features matching the new simplified model structure.
+
+    Features are:
+    - Time encoding (sin/cos if cyclical, normalized timesteps if not)
+    - Static covariates (scaled)
+    - Extra 2 features: post9 flag and time_since9_years
 
     Parameters
     ----------
@@ -566,8 +472,8 @@ def prepare_input_features_schema(
         Prepared input features array of shape (T, n_features).
     """
     T_len = len(df)
-    abs_t = df["abs_timesteps"].values
-    rel_t = df["timesteps"].values
+    abs_t = df["abs_timesteps"].values.astype(np.float32)
+    rel_t = df["timesteps"].values.astype(np.float32)
     schema = models.lstm_schema
 
     # Base static features
@@ -582,91 +488,29 @@ def prepare_input_features_schema(
         raw_matrix[~post_mask, j] = 0.0
 
     # Scale static features
-    scaled = models.static_scaler.transform(raw_matrix)
+    scaled_matrix = models.static_scaler.transform(raw_matrix)
 
-    # Build feature columns based on schema
+    # Build feature columns
     cols = []
 
     # Time encoding
     if schema.cyc:
-        day_of_year = abs_t % 365
-        sin_t = np.sin(2 * np.pi * day_of_year / 365)
-        cos_t = np.cos(2 * np.pi * day_of_year / 365)
+        day_of_year = abs_t % 365.0
+        sin_t = np.sin(2 * np.pi * day_of_year / 365.0)
+        cos_t = np.cos(2 * np.pi * day_of_year / 365.0)
         cols.append(np.column_stack([sin_t, cos_t]))
     else:
         t_min, t_max = rel_t.min(), rel_t.max()
         t_norm = (rel_t - t_min) / (t_max - t_min) if t_max > t_min else rel_t
         cols.append(t_norm.reshape(-1, 1))
 
-    # Year index
-    if schema.add_year_idx:
-        cols.append((abs_t / 365).reshape(-1, 1))
-
     # Static covariates
-    cols.append(scaled)
+    cols.append(scaled_matrix)
 
-    # Extra post-intervention features
-    if schema.extra2 == 2:
-        post9 = (abs_t >= models.intervention_day).astype(np.float32)
-        t_since9_years = np.maximum(0, abs_t - models.intervention_day) / 365
-        cols.append(np.column_stack([post9, t_since9_years]))
-
-    # Lagged target (if needed)
-    if schema.include_lag:
-        target_col = "prevalence" if models.predictor == "prevalence" else "cases"
-        y = df[target_col].values
-
-        # Transform target
-        if models.predictor == "prevalence":
-            y_clip = np.clip(y, models.eps_prevalence, 1 - models.eps_prevalence)
-            y_tf = np.log(y_clip / (1 - y_clip))
-        else:
-            y_tf = np.log1p(np.maximum(y, 0))
-
-        y_lag = np.concatenate([[y_tf[0]], y_tf[:-1]])
-        cols.append(y_lag.reshape(-1, 1))
-
-    # Event features
-    if schema.events_n == 9:
-        itn_future = float(row0["itn_future"])
-
-        # ITN events
-        if itn_future > 0:
-            itn_events = [0, 1095, 2190, 3285]
-        else:
-            itn_events = [0]
-
-        # IRS events
-        irs_all = list(range(0, 4381, 365))
-        irs_future = float(row0["irs_future"])
-        if irs_future > 0:
-            irs_events = irs_all
-        else:
-            irs_events = [e for e in irs_all if e < models.intervention_day]
-
-        # LSM events
-        lsm = float(row0["lsm"])
-        lsm_events = [3285] if lsm > 0 else []
-
-        # Create pulse and time-since features
-        p_itn = create_event_pulses(abs_t, itn_events, models.event_jitter_days)
-        p_irs = create_event_pulses(abs_t, irs_events, models.event_jitter_days)
-        p_lsm = create_event_pulses(abs_t, lsm_events, models.event_jitter_days)
-
-        is_post_itn = (abs_t >= models.intervention_day).astype(np.float32) if itn_future > 0 else np.zeros(T_len)
-        is_post_irs = (abs_t >= (irs_events[0] if irs_events else 1e9)).astype(np.float32)
-        is_post_lsm = (abs_t >= 3285).astype(np.float32) if lsm_events else np.zeros(T_len)
-
-        tau_itn = create_time_since(abs_t, itn_events)
-        tau_irs = create_time_since(abs_t, irs_events)
-        tau_lsm = create_time_since(abs_t, lsm_events)
-
-        event_matrix = np.column_stack([
-            p_itn, p_irs, p_lsm,
-            is_post_itn, is_post_irs, is_post_lsm,
-            tau_itn, tau_irs, tau_lsm,
-        ])
-        cols.append(event_matrix)
+    # Extra post-intervention features (always included in new models)
+    post9 = (abs_t >= models.intervention_day).astype(np.float32)
+    t_since9_years = np.maximum(0.0, abs_t - models.intervention_day) / 365.0
+    cols.append(np.column_stack([post9, t_since9_years]))
 
     # Combine all features
     X = np.hstack(cols)
@@ -674,7 +518,8 @@ def prepare_input_features_schema(
     # Verify dimensions
     if X.shape[1] != schema.expected_in:
         raise ValueError(
-            f"Feature width {X.shape[1]} != checkpoint expected {schema.expected_in}"
+            f"Feature width {X.shape[1]} != checkpoint expected {schema.expected_in}. "
+            f"Schema: cyc={schema.cyc}, static_n={len(models.static_covars)}, extra2={schema.extra2}"
         )
 
     return X.astype(np.float32)
