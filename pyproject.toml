@@ -28,7 +28,7 @@ dependencies = [
     "matplotlib>=3.7.0",
     "scipy>=1.10.0",
     "joblib>=1.3.0",
-    "estimint>=0.1.1",
+    "estimint>=1.1.0",
 ]
 
 [project.optional-dependencies]
