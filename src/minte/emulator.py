@@ -49,11 +49,29 @@ def transform_targets_np(y: np.ndarray, predictor: str, eps: float = 1e-5) -> np
 
 
 def inverse_transform_np(y: np.ndarray, predictor: str) -> np.ndarray:
-    """Inverse transform model outputs to original scale."""
+    """
+    Inverse transform model outputs to original scale.
+
+    For prevalence: sigmoid transform (always in (0, 1)).
+    For cases: expm1 clamped to non-negative values.
+
+    Parameters
+    ----------
+    y : np.ndarray
+        Model outputs in transformed space. Can be 1D [T] or 2D [B, T].
+    predictor : str
+        Type of predictor ("prevalence" or "cases").
+
+    Returns
+    -------
+    np.ndarray
+        Inverse-transformed predictions in original scale.
+    """
     if predictor == "prevalence":
-        return 1.0 / (1.0 + np.exp(-y))  # sigmoid
+        return 1.0 / (1.0 + np.exp(-y))  # sigmoid, always in (0, 1)
     else:
-        return np.expm1(y)
+        # Cases: expm1 clamped to non-negative (allows recovery after troughs)
+        return np.maximum(np.expm1(y), 0.0)
 
 
 # ---------------------------
