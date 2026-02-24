@@ -67,6 +67,7 @@ def run_mintweb_controller(
     net_type_future=None,
     itn_future=None,
     scenario_tag=None,
+    mosquito_increase=0.0,
     clean_output: bool = True,
     tabulate: bool = True,
 ) -> MintwebResults:
@@ -145,7 +146,8 @@ def run_mintweb_controller(
     lsm = _to_list(lsm)
     res_future = _to_list(res_future)
     itn_future = _to_list(itn_future)
-    
+    mosquito_increase = _to_list(mosquito_increase)
+
     # Handle string scenario_tag and net_type_future
     if isinstance(scenario_tag, str):
         scenario_tag = [scenario_tag]
@@ -170,6 +172,7 @@ def run_mintweb_controller(
         irs=irs,
         irs_future=irs_future,
         lsm=lsm,
+        mosquito_increase=mosquito_increase,
         # Default technical parameters
         eir_models=["xgboost"],
         prevalence_models=["LSTM"],
