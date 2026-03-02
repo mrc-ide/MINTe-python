@@ -17,7 +17,7 @@ from typing import Any, Literal
 import numpy as np
 import pandas as pd
 from estimint import load_xgb_model, run_xgb_model
-from estimint.hbr import estimate_eir_with_mosquito_increase
+from estimint.hbr import estimate_eir_with_mosquito_delta
 
 from .cache import get_cached_model, preload_all_models, is_cached
 from .emulator import run_malaria_emulator
@@ -153,7 +153,7 @@ def run_minter_scenarios(
     res_future=None,
     net_type_future=None,
     itn_future: list[float] | np.ndarray | None = None,
-    mosquito_increase: float | list[float] | np.ndarray = 0.0,
+    mosquito_delta: float | list[float] | np.ndarray | None = 0.0,
     eir_models: list[str] = ["xgboost"],
     prevalence_models: list[str] = ["LSTM"],
     cases_models: list[str] = ["LSTM"],
@@ -268,15 +268,18 @@ def run_minter_scenarios(
     # Validate inputs
     n_scenarios = len(res_use)
 
-    # Handle mosquito_increase: scalar -> broadcast, array -> validate length
-    if isinstance(mosquito_increase, (int, float)):
-        mosquito_increase = np.full(n_scenarios, float(mosquito_increase))
+    # Handle mosquito_delta: scalar -> broadcast, array -> validate length
+    if mosquito_delta is None:
+        mosquito_delta = 0.0
+        
+    if isinstance(mosquito_delta, (int, float)):
+        mosquito_delta = np.full(n_scenarios, float(mosquito_delta))
     else:
-        mosquito_increase = np.atleast_1d(np.asarray(mosquito_increase, dtype=float))
-    if len(mosquito_increase) != n_scenarios:
+        mosquito_delta = np.atleast_1d(np.asarray(mosquito_delta, dtype=float))
+    if len(mosquito_delta) != n_scenarios:
         raise ValueError(
-            f"mosquito_increase must be a scalar or have length {n_scenarios}, "
-            f"got length {len(mosquito_increase)}"
+            f"mosquito_delta must be a scalar or have length {n_scenarios}, "
+            f"got length {len(mosquito_delta)}"
         )
 
     if not all(len(arr) == n_scenarios for arr in [py_only, py_pbo, py_pyrrole, py_ppf]):
@@ -440,10 +443,10 @@ def run_minter_scenarios(
         eir = predict_eir_xgboost(runtime)
 
         # If mosquito density increase requested, use HBR model to adjust EIR
-        if mosquito_increase[i] > 0:
-            hbr_result = estimate_eir_with_mosquito_increase(
+        if mosquito_delta[i] != 0:
+            hbr_result = estimate_eir_with_mosquito_delta(
                 prevalence=float(prev[i]),
-                mosquito_increase=float(mosquito_increase[i]),
+                mosquito_delta=float(mosquito_delta[i]),
                 dn0_use=float(net_now.dn0),
                 Q0=float(Q0[i]),
                 phi_bednets=float(phi[i]),
