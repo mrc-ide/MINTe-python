@@ -67,7 +67,7 @@ def run_mintweb_controller(
     net_type_future=None,
     itn_future=None,
     scenario_tag=None,
-    mosquito_delta=0.0,
+    mosquito_delta=None,
     clean_output: bool = True,
     tabulate: bool = True,
 ) -> MintwebResults:
@@ -116,6 +116,8 @@ def run_mintweb_controller(
         Future ITN coverage (0-1).
     scenario_tag : str or list[str], optional
         Scenario identifiers.
+    mosquito_delta : float or array-like, optional
+        Adjustment to mosquito population (e.g. for climate change).
     clean_output : bool, default True
         Remove helper columns and filter timesteps.
     tabulate : bool, default True
@@ -146,16 +148,13 @@ def run_mintweb_controller(
     lsm = _to_list(lsm)
     res_future = _to_list(res_future)
     itn_future = _to_list(itn_future)
-    if mosquito_delta is None:
-        mosquito_delta = 0.0
-    mosquito_delta = _to_list(mosquito_delta)
 
     # Handle string scenario_tag and net_type_future
     if isinstance(scenario_tag, str):
         scenario_tag = [scenario_tag]
     if isinstance(net_type_future, str):
         net_type_future = [net_type_future]
-    
+
     # Run main MINT scenarios with default parameters
     results = run_minter_scenarios(
         res_use=res_use,
